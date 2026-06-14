@@ -16,6 +16,12 @@
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 
+//#define SIMPLE_RR_SCHED 1
+//#define PICO_SCHED_RR_EQUALSHARE 1
+
+#ifdef SIMPLE_RR_SCHED
+#undef PICO_SCHED_RR_EQUALSHARE
+#endif
 /**
  * @brief Number of cores the RP2040 Chip has.
  */
@@ -24,7 +30,7 @@
 /**
  * @brief Maximum number of threads a user can execute at once.
  */
-#define PICOS_USER_THREADS 8
+#define PICOS_USER_THREADS 2
 
 /**
  * @brief Maximum number of total threads.
@@ -73,7 +79,16 @@
 /**
  * @brief How many µs do we want to wait between scheduler calls
  */
+
+#ifdef PICO_SCHED_RR_EQUALSHARE
+#define PICOS_SCHEDULER_INTERVAL_US 5000
+#define PICOS_TIME_QUANTUM_US 10000
+#else//PICO_SCHED_RR_EQUALSHARE
 #define PICOS_SCHEDULER_INTERVAL_US 10000
+#endif
+#define PICOS_LOG_BUFFER_SIZE 6400
+
+
 
 /**
  * @brief Process ID type used in the PicOS.
@@ -104,6 +119,7 @@ typedef enum picos_thread_state_t {
      */
     PICOS_RUNNING,
     PICOS_READY,
+    PICOS_SLEEPING,
     /**
      * @brief Describes a thread that had an hardfault. Information will be
      * preserved.
@@ -154,6 +170,16 @@ typedef struct picos_thread_t {
      * @brief Execution time of thread
      */
     uint64_t execTime;
+#ifdef PICO_SCHED_RR_EQUALSHARE
+    /**
+     * @brief Time used from current time quantum (for round-robin scheduling)
+     */
+    uint64_t timeQuantumUsed;
+#endif //PICO_SCHED_RR_EQUALSHARE
+    /**
+     * @brief Absolute wake-up time in microsec for sleeping thread
+     */
+    uint64_t sleepUtilsUS;
     struct picos_thread_t *next;
 } picos_thread_t;
 
@@ -206,6 +232,13 @@ extern picos_thread_t picos_threads[PICOS_MAX_THREADS];
 extern picos_thread_t *picos_current[PICOS_CORES];
 extern pico_core_stats_t pico_core_stats[PICOS_CORES];
 
+typedef struct picos_run_log_entry_t {
+    uint64_t timestamp_us;
+    picos_pid thread_id;
+    uint8_t core;
+    uint8_t priority;
+}picos_run_log_entry_t;
+
 /**
  * @brief Initialized the PicOS.
  *
@@ -247,3 +280,11 @@ void picos_enter_critical();
  * This will redo the changes done by the enter_critcial function.
  */
 void picos_leave_critical();
+uint32_t picos_log_get_underflow_count(void);
+void picos_log_thread_run(uint8_t core, uint8_t priority, picos_pid thread_id,
+                            uint64_t timestamp_us);
+bool picos_log_pop(picos_run_log_entry_t *entry);
+uint32_t picos_log_get_underflow_count(void);
+uint32_t picos_log_get_overflow_count(void);
+void picos_log_note_underflow(void);
+void picos_thread_sleep(uint32_t ms);
