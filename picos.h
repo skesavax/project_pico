@@ -16,12 +16,6 @@
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 
-//#define SIMPLE_RR_SCHED 1
-//#define PICO_SCHED_RR_EQUALSHARE 1
-
-#ifdef SIMPLE_RR_SCHED
-#undef PICO_SCHED_RR_EQUALSHARE
-#endif
 /**
  * @brief Number of cores the RP2040 Chip has.
  */
@@ -30,7 +24,10 @@
 /**
  * @brief Maximum number of threads a user can execute at once.
  */
-#define PICOS_USER_THREADS 2
+#define PICOS_USER_THREADS 4
+
+void delayus(uint32_t us);
+#define delayms(x) delayus(x*1000)
 
 /**
  * @brief Maximum number of total threads.
@@ -79,16 +76,7 @@
 /**
  * @brief How many µs do we want to wait between scheduler calls
  */
-
-#ifdef PICO_SCHED_RR_EQUALSHARE
-#define PICOS_SCHEDULER_INTERVAL_US 5000
-#define PICOS_TIME_QUANTUM_US 10000
-#else//PICO_SCHED_RR_EQUALSHARE
 #define PICOS_SCHEDULER_INTERVAL_US 10000
-#endif
-#define PICOS_LOG_BUFFER_SIZE 6400
-
-
 
 /**
  * @brief Process ID type used in the PicOS.
@@ -118,8 +106,6 @@ typedef enum picos_thread_state_t {
      * scheduled.
      */
     PICOS_RUNNING,
-    PICOS_READY,
-    PICOS_SLEEPING,
     /**
      * @brief Describes a thread that had an hardfault. Information will be
      * preserved.
@@ -128,7 +114,8 @@ typedef enum picos_thread_state_t {
      * and the scheduler will receive a new call and switch to a new process. If
      * no new process can be found, the idle process will kick in.
      */
-    PICOS_HARDFAULT
+    PICOS_HARDFAULT,
+    PICOS_WAIT
 } picos_thread_state_t;
 
 /**
@@ -153,8 +140,10 @@ typedef struct picos_thread_t {
      * If the thread hasn't been claimed by any core yet, the default value is
      * UINT8_MAX.
      */
-    uint8_t cpu;
     uint8_t priority;
+    volatile uint8_t cpu;
+    volatile bool yielded;
+    volatile uint64_t waitExpires;
     /**
      * @brief The process id of this thread.
      *
@@ -165,28 +154,20 @@ typedef struct picos_thread_t {
     /**
      * @brief The state currently assigned to this thread.
      */
-    picos_thread_state_t state; //// READY, RUNNING, BLOCKED, WAIT_DMA
+    volatile picos_thread_state_t state;
     /**
      * @brief Execution time of thread
      */
     uint64_t execTime;
-#ifdef PICO_SCHED_RR_EQUALSHARE
-    /**
-     * @brief Time used from current time quantum (for round-robin scheduling)
-     */
-    uint64_t timeQuantumUsed;
-#endif //PICO_SCHED_RR_EQUALSHARE
-    /**
-     * @brief Absolute wake-up time in microsec for sleeping thread
-     */
-    uint64_t sleepUtilsUS;
-    struct picos_thread_t *next;
 } picos_thread_t;
 
-typedef struct {
-    picos_thread_t *head;
-    picos_thread_t *tail;
-} picos_ready_queue_t;
+typedef struct picos_run_log_entry_t {
+    uint64_t timestamp_us;
+    uint8_t core;
+    uint8_t priority;
+    uint16_t thread_id;
+}picos_run_log_entry_t;
+
 /**
  * @brief Describe a thread stack with data and specified size.
  *
@@ -232,13 +213,6 @@ extern picos_thread_t picos_threads[PICOS_MAX_THREADS];
 extern picos_thread_t *picos_current[PICOS_CORES];
 extern pico_core_stats_t pico_core_stats[PICOS_CORES];
 
-typedef struct picos_run_log_entry_t {
-    uint64_t timestamp_us;
-    picos_pid thread_id;
-    uint8_t core;
-    uint8_t priority;
-}picos_run_log_entry_t;
-
 /**
  * @brief Initialized the PicOS.
  *
@@ -280,6 +254,7 @@ void picos_enter_critical();
  * This will redo the changes done by the enter_critcial function.
  */
 void picos_leave_critical();
+
 uint32_t picos_log_get_underflow_count(void);
 void picos_log_thread_run(uint8_t core, uint8_t priority, picos_pid thread_id,
                             uint64_t timestamp_us);
@@ -287,4 +262,3 @@ bool picos_log_pop(picos_run_log_entry_t *entry);
 uint32_t picos_log_get_underflow_count(void);
 uint32_t picos_log_get_overflow_count(void);
 void picos_log_note_underflow(void);
-void picos_thread_sleep(uint32_t ms);

@@ -5,53 +5,55 @@
 picos_thread_t picos_threads[PICOS_MAX_THREADS];
 picos_thread_t *picos_current[PICOS_CORES];
 pico_core_stats_t pico_core_stats[PICOS_CORES];
-
-#define MAX_PRIORITY_QUEUE 4
-#ifdef PICO_SCHED_RR_EQUALSHARE
-static uint8_t priority_ready_count[MAX_PRIORITY_QUEUE];
-#endif //PICO_SCHED_RR_EQUALSHARE
-picos_ready_queue_t priority_queue[MAX_PRIORITY_QUEUE];
-uint32_t priority_queue_bitmap = 0;
-#define SET_BIT(p)   (priority_queue_bitmap |=  (1U << (p)))
-#define CLR_BIT(p)   (priority_queue_bitmap &= ~(1U << (p)))
-#define HAS_BIT(p)   (priority_queue_bitmap &   (1U << (p)))
-
+#define PICOS_LOG_BUFFER_SIZE 6400
 static picos_run_log_entry_t picos_log_buffer[PICOS_CORES][PICOS_LOG_BUFFER_SIZE];
 static volatile uint32_t picos_log_head[PICOS_CORES] = {0};
 static volatile uint32_t picos_log_tail[PICOS_CORES] = {0};
 static uint32_t picos_log_overflow_count[PICOS_CORES] = {0};
 static uint32_t picos_log_underflow_count = 0;
 static uint8_t picos_log_rr_core = 0;
-static picos_thread_t *picos_sleep_list[PICOS_CORES] = {0};
 
-static void picos_enqueue_thread(picos_thread_t *t);
-void isr_systick(void);
+// Declare functions that will be later defined
+void picos_setup_idle();
+void picos_suicide();
+void picos_scheduler_main();
 
-static void picos_sleep_enqueue(uint8_t core, picos_thread_t *thread){
-    thread->next = picos_sleep_list[core];
-    picos_sleep_list[core] = thread;
+// Functions from our assembler code
+void picos_exec_stack(uint32_t sp);
+void picos_set_psp(uint32_t sp, uint32_t ctrl);
+
+void picos_init() { picos_setup_idle(); }
+
+uint8_t getPID() {
+  uint8_t pid;
+  asm("cpsid i");
+  uint32_t cpu = get_core_num();
+  pid = picos_current[cpu]->pid;
+  asm("cpsie i");
+  return pid;
 }
 
-static void picos_wake_expired_sleepers(uint8_t core, uint64_t now){
-    picos_thread_t *prev = NULL;
-    picos_thread_t *node = picos_sleep_list[core];
+void yield() {
+  picos_thread_t *t = &picos_threads[getPID()];
+  t->yielded = true;
+  *(volatile uint32_t *)(0xe0000000|M0PLUS_ICSR_OFFSET) = (1L<<26); // SysTick pending
+  // Wait for context switch
+  __asm volatile ("isb");
+}
 
-    while (node){
-        picos_thread_t *next = node->next;
-        if (node->sleepUtilsUS <= now ){
-            if (prev){
-                prev->next = next;
-            } else {
-                picos_sleep_list[core] = next;
-            }
-            node->next = NULL;
-            printf("WAKE pid=%u\n", node->pid);
-            picos_enqueue_thread(node);
-        } else {
-            prev = node;
-        }
-        node = next;
-    }
+uint64_t getTimeUs() {
+  uint64_t tm = *(volatile uint32_t*)(TIMER_BASE + 0x0c);
+  uint64_t htm = *(volatile uint32_t*)(TIMER_BASE + 0x08);
+  return (htm<<32)|tm;
+}
+
+// Delay thread the specified number of microseconds.
+// Guaranteed to be at least us delay.
+void delayus(uint32_t us) {
+  uint8_t pid = getPID();
+  picos_threads[pid].waitExpires = getTimeUs() + us;
+  picos_threads[pid].state = PICOS_WAIT;
+  yield();
 }
 
 void picos_log_thread_run(uint8_t core, uint8_t priority, picos_pid thread_id,
@@ -108,85 +110,6 @@ void picos_log_note_underflow(void){
     picos_log_underflow_count++;
 }
 
-void picos_enqueue_thread(picos_thread_t *t) {
-    uint8_t priority = t->priority;
-    picos_ready_queue_t *q = &priority_queue[priority];
-    t->next = NULL; //last entry is pointed to NULL
-#ifdef PICO_SCHED_RR_EQUALSHARE
-    t->timeQuantumUsed = 0; //Reset time quantum for this thread
-#endif//PICO_SCHED_RR_EQUALSHARE
-    if (q->tail == NULL){
-        q->head = q->tail = t;
-        SET_BIT(priority);
-    }
-    else {
-       q->tail->next = t; //add element to last entry of circle linked list
-       q->tail = t;
-    }
-#ifdef PICO_SCHED_RR_EQUALSHARE
-    priority_ready_count[priority]++;
-#endif//PICO_SCHED_RR_EQUALSHARE
-    t->state = PICOS_READY;
-}
-
-picos_thread_t* picos_dequeue_thread(uint8_t priority) {
-    picos_ready_queue_t *q = &priority_queue[priority];
-    if (q->head == NULL) {
-        return NULL;
-    }
-    picos_thread_t *t = q->head;
-    q->head = t->next;
-    if (q->head == NULL){
-        q->tail = NULL;
-        CLR_BIT(priority);
-    }
-    t->next = NULL;
-#ifdef PICO_SCHED_RR_EQUALSHARE
-    if (priority_ready_count[priority] > 0)
-        priority_ready_count[priority]--;
-#endif//PICO_SCHED_RR_EQUALSHARE
-    return t;
-}
-
-static inline int32_t picos_get_high_priority(){
-    if (priority_queue_bitmap == 0){
-        return -1;
-    }
-    return 31 - __builtin_clz(priority_queue_bitmap);
-}
-#ifdef PICO_SCHED_RR_EQUALSHARE
-static uint32_t picos_count_threads_of_priority(uint8_t priority){
-    uint32_t count = priority_ready_count[priority];
-    for (uint8_t cpu=0; cpu < PICOS_CORES; cpu++){
-        picos_thread_t *current = picos_current[cpu];
-        if (current && current->pid >= PICOS_CORES && 
-            current->state == PICOS_RUNNING && current->priority == priority){
-                count++;
-            }
-    }
-    return (count == 0)? 1:count;
-}
-
-static uint64_t picos_compute_quantum_us(uint8_t priority){
-    uint64_t budget_us = PICOS_TIME_QUANTUM_US;
-    if (budget_us > PICOS_SCHEDULER_INTERVAL_US){
-        budget_us = PICOS_SCHEDULER_INTERVAL_US;
-    }
-    uint64_t quantum_us = budget_us / picos_count_threads_of_priority(priority);
-    return (quantum_us == 0)? 1: quantum_us;
-}
-#endif //PICO_SCHED_RR_EQUALSHARE
-// Declare functions that will be later defined
-void picos_setup_idle();
-void picos_suicide();
-void picos_scheduler_main();
-
-// Functions from our assembler code
-void picos_exec_stack(uint32_t sp);
-void picos_set_psp(uint32_t sp, uint32_t ctrl);
-
-void picos_init() { picos_setup_idle(); }
-
 picos_pid picos_exec(picos_thread_func func, picos_thread_stack_t *s, uint8_t priority) {
     picos_pid thread_slot;
 
@@ -210,14 +133,6 @@ picos_pid picos_exec(picos_thread_func func, picos_thread_stack_t *s, uint8_t pr
     slot->pid = thread_slot;
     slot->cpu = 0xFF;
     slot->priority = priority;
-
-    slot->execTime = 0;
-#ifdef PICO_SCHED_RR_EQUALSHARE
-    slot->timeQuantumUsed = 0;
-#endif
-    slot->lastStartTime = 0;
-    slot->sleepUtilsUS = 0;
-
     // calculate given address to a stack address (switch direction)
     slot->sp = (uint32_t)(s->data + s->size - 16);
     s->data[s->size - 1] =
@@ -230,47 +145,10 @@ picos_pid picos_exec(picos_thread_func func, picos_thread_stack_t *s, uint8_t pr
         (uint32_t)&picos_suicide; // if the actual thread function should exit,
                                   // this is the function to call next.
     slot->state = PICOS_RUNNING;
-    picos_enqueue_thread(slot);
 
     spin_unlock_unsafe(PICOS_SCHEDULE_SPINLOCK);
 
     return thread_slot;
-}
-
-void picos_thread_sleep(uint32_t ms){
-    uint8_t cpu = get_core_num();
-    uint64_t now = time_us_64();
-    uint64_t elapsed = 0;
-    spin_lock_blocking(PICOS_SCHEDULE_SPINLOCK);
-
-    picos_thread_t *current = picos_current[cpu];
-    printf("ENTER SLEEP pid=%u\n", current->pid);
-    if (current == NULL || current->pid < PICOS_CORES ||
-         current->state != PICOS_RUNNING){
-        spin_unlock_unsafe(PICOS_SCHEDULE_SPINLOCK);
-        sleep_ms(ms);
-        return;
-    }
-    if (current->lastStartTime > 0){
-        uint64_t elapsed = now - current->lastStartTime;
-        current->execTime += elapsed;
-#ifdef PICO_SCHED_RR_EQUALSHARE
-        current->timeQuantumUsed +=elapsed;
-#endif
-    }
-    current->state = PICOS_SLEEPING;
-    current->sleepUtilsUS = now + ((uint64_t)ms * 1000ULL);
-    current->lastStartTime = 0;
-    picos_sleep_enqueue(cpu, current);
-    spin_unlock_unsafe(PICOS_SCHEDULE_SPINLOCK);
-    printf("SLEEP pid=%u wake=%llu\n",
-       current->pid,
-       current->sleepUtilsUS);
-    // trigger a context s/w so another runnable thread can execute now.
-    isr_systick();
-    while(picos_current[cpu] == current){
-        asm volatile("wfi");
-    }
 }
 
 void picos_start() {
@@ -294,7 +172,8 @@ void isr_systick() {
 }
 
 void isr_hardfault() {
-    uint8_t cpu = *(uint32_t *)(SIO_BASE);
+    //uint8_t cpu = *(uint32_t *)(SIO_BASE);
+    uint32_t cpu = get_core_num();
 
     // Update state to hardfault
     picos_thread_t *current = picos_current[cpu];
@@ -308,69 +187,6 @@ void isr_hardfault() {
 }
 
 void picos_schedule() {
-    spin_lock_blocking(PICOS_SCHEDULE_SPINLOCK);
-    uint32_t cpu = get_core_num();   // IMPORTANT FIX (do NOT use SIO_BASE)
-    picos_thread_t *current = picos_current[cpu];
-    picos_thread_t *next = NULL;
-    uint64_t now = time_us_64();
-    picos_wake_expired_sleepers((uint8_t)cpu, now);
-#ifdef PICO_SCHED_RR_EQUALSHARE
-    //Account execution time for current thread
-    if (current->lastStartTime > 0){
-        uint64_t elapsed = now - current->lastStartTime;
-        current->execTime += elapsed;
-        current->timeQuantumUsed += elapsed;
-    }
-    if (current->pid >= PICOS_CORES){
-        uint32_t highest_priority = picos_get_high_priority();
-        bool higher_prio_waiting = (highest_priority > (uint32_t)current->priority);
-        uint64_t quantum_us = picos_compute_quantum_us(current->priority);
-        if (!higher_prio_waiting && current->timeQuantumUsed < quantum_us){
-            //keep running this thread until it consumes its equal share
-            current->lastStartTime = now;
-            spin_unlock_unsafe(PICOS_SCHEDULE_SPINLOCK);
-            return;
-        }
-        current->state = PICOS_READY;
-        picos_enqueue_thread(current);
-    }
-#else //#ifdef PICO_SCHED_RR_EQUALSHARE
-    if (current && current->state == PICOS_RUNNING) {
-        printf("CURRENT pid=%u state=%u\n",
-       current->pid,
-       current->state);
-        uint64_t last = current->lastStartTime;
-        current->execTime += (now - current->lastStartTime);
-        current->state = PICOS_READY;
-        picos_enqueue_thread(current);
-    }
-#endif
-    //pick next thread
-    uint8_t priority = picos_get_high_priority();
-    if (priority < 0){
-        next = &picos_threads[cpu]; // idle thread
-    }
-    else {
-        next = picos_dequeue_thread(priority);
-        if (!next)
-            next = &picos_threads[cpu]; // idle thread
-    }
-    next->state = PICOS_RUNNING;
-    next->lastStartTime = now;
-    printf("CPU%u -> pid=%u state=%u prio=%u\n",
-       cpu,
-       next->pid,
-       next->state,
-       next->priority);
-#ifdef PICO_SCHED_RR_EQUALSHARE
-    next->timeQuantumUsed = 0;//Rest quantum for new thread
-#endif
-    picos_current[cpu] = next;
-    spin_unlock_unsafe(PICOS_SCHEDULE_SPINLOCK);
-}
-
-#ifdef SIMPLE_RR_SCHED
-void picos_schedule() {
 
     uint32_t cpu = get_core_num();   // IMPORTANT FIX (do NOT use SIO_BASE)
 
@@ -378,6 +194,8 @@ void picos_schedule() {
     pico_core_stats_t *stats = &pico_core_stats[cpu];
 
     uint64_t now = time_us_64();
+    uint8_t cpriority = 255;
+    current->yielded = false; // Yield waits for this to reset
 
     // =========================
     // 1. ACCOUNT CURRENT THREAD TIME
@@ -407,14 +225,29 @@ void picos_schedule() {
 
     picos_thread_t *next = NULL;
 
-    for (picos_pid i = 1; i < PICOS_MAX_THREADS; i++) {
+    for (picos_pid i = PICOS_CORES; i < PICOS_MAX_THREADS; i++) {
+        picos_thread_t *t =
+            &picos_threads[(((current->pid - PICOS_CORES) + i) %
+            PICOS_USER_THREADS) + PICOS_CORES];
+        if (t->cpu != 0xff && t->cpu != cpu) continue;
+
+        if (t->state == PICOS_WAIT && t->waitExpires <= now) {
+             t->state = PICOS_RUNNING;
+        }
+        if (t->state == PICOS_RUNNING && t->priority < cpriority){
+            cpriority = t->priority;
+        }
+    }
+
+    for (picos_pid i = PICOS_CORES; i < PICOS_MAX_THREADS; i++) {
 
         picos_thread_t *t =
             &picos_threads[(((current->pid - PICOS_CORES) + i) %
             PICOS_USER_THREADS) + PICOS_CORES];
 
         if (t->state == PICOS_RUNNING &&
-           (t->cpu == cpu || t->cpu == 0xFF)) {
+           (t->cpu == cpu || t->cpu == 0xFF) && 
+           (t->priority == cpriority)) {
 
             next = t;
 
@@ -438,8 +271,16 @@ void picos_schedule() {
     // 4. SET START TIME FOR NEW THREAD
     // =========================
     next->lastStartTime = time_us_64();
+/*
+    printf("CPU%d current=%d next=%d prio=%d\n",
+       cpu,
+       current->pid,
+       next->pid,
+       next->priority);
+*/
+
 }
-#endif //SIMPLE_RR_SCHED
+
 // idle structure
 PICOS_STACK(idle0, PICOS_IDLE_STACK_SIZE)
 PICOS_STACK(idle1, PICOS_IDLE_STACK_SIZE)
@@ -457,15 +298,8 @@ void picos_setup_idle() {
         picos_thread_stack_t *s = picos_idle_stack[i];
         t->pid = i;
         t->cpu = i;
+        t->priority = 255;
         t->state = PICOS_RUNNING;
-        t->priority = 0;
-        t->execTime = 0;
-        t->sleepUtilsUS = 0;
-        t->lastStartTime = 0;
-        t->next = NULL;
-#ifdef PICO_SCHED_RR_EQUALSHARE
-        t->timeQuantumUsed = 0;
-#endif
 
         // Setting the correct stack data and position
         s->data[s->size - 1] =

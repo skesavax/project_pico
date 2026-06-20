@@ -3,153 +3,88 @@
 #include "pico/stdlib.h"
 #include <stdio.h>
 
-PICOS_STACK(thread1, 128);
-void thread1() {
-    volatile uint8_t i = 0;
-    for (;;) {
-        i++;
+PICOS_STACK(test1, 128);
+void test1() {
+    volatile uint32_t sum = 0;
+    while (true) {
+        for (uint32_t i = 0; i < 50000; i++)
+            sum += i;
         uint8_t core = get_core_num();
         picos_thread_t *current = picos_current[core];
         if (current && current->pid >= PICOS_CORES){
             picos_log_thread_run(core, current->priority, current->pid, time_us_64());
         }
-        picos_thread_sleep(2000);
+        delayms(100);
     }
 }
 
-PICOS_STACK(thread2, 128);
-void thread2() {
-    volatile uint8_t i = 0;
+PICOS_STACK(test1x, 128);
+void test1x() {
     for (;;) {
-        i++;
         uint8_t core = get_core_num();
         picos_thread_t *current = picos_current[core];
         if (current && current->pid >= PICOS_CORES){
-            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
+            ;//picos_log_thread_run(core, current->priority, current->pid, time_us_64());
         }
-        //sleep_ms(1000);
-    }
-}
-PICOS_STACK(thread3, 128);
-void thread3() {
-    volatile uint8_t i = 0;
-    for (;;) {
-        i++;
-        uint8_t core = get_core_num();
-        picos_thread_t *current = picos_current[core];
-        if (current && current->pid >= PICOS_CORES){
-            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
-        }
-        sleep_ms(1000);
-    }
-}
-PICOS_STACK(thread4, 128);
-void thread4() {
-    volatile uint8_t i = 0;
-    for (;;) {
-        i++;
-        uint8_t core = get_core_num();
-        picos_thread_t *current = picos_current[core];
-        if (current && current->pid >= PICOS_CORES){
-            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
-        }
-        sleep_ms(1000);
-    }
-}
-PICOS_STACK(thread5, 128);
-void thread5() {
-    volatile uint8_t i = 0;
-    for (;;) {
-        i++;
-        uint8_t core = get_core_num();
-        picos_thread_t *current = picos_current[core];
-        if (current && current->pid >= PICOS_CORES){
-            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
-        }
-        picos_thread_sleep(2000);
-    }
-}
-PICOS_STACK(thread6, 128);
-void thread6() {
-    volatile uint8_t i = 0;
-    for (;;) {
-        i++;
-        uint8_t core = get_core_num();
-        picos_thread_t *current = picos_current[core];
-        if (current && current->pid >= PICOS_CORES){
-            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
-        }
-        sleep_ms(1000);
-    }
-}
-PICOS_STACK(thread7, 128);
-void thread7() {
-    volatile uint8_t i = 0;
-    for (;;) {
-        i++;
-        uint8_t core = get_core_num();
-        picos_thread_t *current = picos_current[core];
-        if (current && current->pid >= PICOS_CORES){
-            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
-        }
-        sleep_ms(1000);
+        //printf("thread-1\n\r");
+        delayms(200);
     }
 }
 
 PICOS_STACK(test2, 128);
 void test2() {
-    // Example from: https://wiki.segger.com/Cortex-M_Fault#Illegal_Memory_Write
-    int r = 0;
-    volatile unsigned int *p = (unsigned int *)0x00100000;
-
-    *p = 0x00BADA55;
-
-    for (;;) {
+    volatile uint32_t sum = 0;
+    while (true) {
+        for (uint32_t i = 0; i < 100000; i++)
+            sum += i;
+        uint8_t core = get_core_num();
+        picos_thread_t *current = picos_current[core];
+        if (current && current->pid >= PICOS_CORES){
+            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
+        }
+        delayms(300);
     }
 }
-
+/*
+PICOS_STACK(test2, 128);
+void test2() {
+    volatile uint32_t sum = 0;
+    while (true) {
+        uint8_t core = get_core_num();
+        picos_thread_t *current = picos_current[core];
+        if (current && current->pid >= PICOS_CORES){
+            ;//picos_log_thread_run(core, current->priority, current->pid, time_us_64());
+        }
+        //printf("thread-1\n\r");
+        delayms(5000);
+    }
+}
+    */
+/*
 PICOS_STACK(test3, 128);
 void test3() {
-    volatile uint8_t i = 0;
-    for (;;) {
-        i++;
-    }
-}
-PICOS_STACK(test_report, 256);
-void test_report() {
-
-    uint64_t lastTime = time_us_64();
-
-    static uint64_t lastThreadExec[PICOS_MAX_THREADS] = {0};
-    static uint64_t lastCoreCtx[PICOS_CORES] = {0};
+    volatile uint32_t sum = 0;
     static uint32_t lastOverflowCount = 0;
     static uint32_t lastUnderflowCount = 0;
-
     while (true) {
-
-        uint64_t now = time_us_64();
-        uint64_t elapsed = now - lastTime;
-
-        if (elapsed == 0) {
-            sleep_ms(1);
-            continue;
-        }
-
-        lastTime = now;
-
-        /*
-        * Run log dump
-        */
-        picos_run_log_entry_t log_entry;
+        for (uint32_t i = 0; i < 200000; i++)
+            sum += i;
+                picos_run_log_entry_t log_entry;
         bool has_log_entries = false;
         while (picos_log_pop(&log_entry)){
             has_log_entries = true;
-            printf("LOG ts=%llu core=%u prio=%u tid=%u\n",
-                log_entry.timestamp_us,
-                log_entry.core,
-                log_entry.priority,
-                (unsigned)log_entry.thread_id);
+            uint8_t *p = (uint8_t *)&log_entry;
+            uint32_t lo = (uint32_t)log_entry.timestamp_us;
+            uint32_t hi = (uint32_t)(log_entry.timestamp_us >> 32);
+
+            printf("ts_hi=%u ts_lo=%u\n", hi, lo);
+
+            for (int i = 0; i < sizeof(log_entry); i++) {
+                printf("%02X ", p[i]);
+            }
+            printf("\n");
         }
+
         if (!has_log_entries){
             picos_log_note_underflow();
         }
@@ -167,7 +102,50 @@ void test_report() {
                     underflowcount - lastUnderflowCount);
             lastUnderflowCount = underflowcount;
         }
+        delayms(300);
+    }
+}
+*/
 
+PICOS_STACK(test3, 128);
+void test3() {
+    volatile uint32_t sum = 0;
+    while (true) {
+        uint8_t core = get_core_num();
+        picos_thread_t *current = picos_current[core];
+        if (current && current->pid >= PICOS_CORES){
+            picos_log_thread_run(core, current->priority, current->pid, time_us_64());
+        }
+        //printf("thread-1\n\r");
+        delayms(500);
+    }
+}
+
+PICOS_STACK(test_report, 1024);
+
+void test_report() {
+
+    uint64_t lastTime = time_us_64();
+
+    static uint64_t lastThreadExec[PICOS_MAX_THREADS] = {0};
+    static uint64_t lastCoreCtx[PICOS_CORES] = {0};
+        static uint32_t lastOverflowCount = 0;
+    static uint32_t lastUnderflowCount = 0;
+
+
+    while (true) {
+#if 0
+        uint64_t now = time_us_64();
+        uint64_t elapsed = now - lastTime;
+
+        if (elapsed == 0) {
+            sleep_ms(1);
+            continue;
+        }
+
+        lastTime = now;
+
+        /*elapsed time wall clock*/
         uint64_t tm = now / 1000000;
 
         printf("\n\nWall time %llu:%02llu:%02llu\n",
@@ -219,13 +197,39 @@ void test_report() {
                    t->state,
                    cpu_pct);
         }
-        printf("BEFORE SLEEP pid=%u\n",
-            picos_current[get_core_num()]->pid);
+#endif
+                picos_run_log_entry_t log_entry;
+        bool has_log_entries = false;
+        while (picos_log_pop(&log_entry)){
+            has_log_entries = true;
+            uint8_t *p = (uint8_t *)&log_entry;
+            
+            for (int i = 0; i < sizeof(log_entry); i++) {
+                printf("%02X ", p[i]);
+            }
+            printf("\n");
+        }
 
-        //picos_thread_sleep(2000);
+        if (!has_log_entries){
+            picos_log_note_underflow();
+        }
+        uint32_t overflowcount = picos_log_get_overflow_count();
+        uint32_t underflowcount = picos_log_get_underflow_count();
+        if (overflowcount != lastOverflowCount){
+            printf("LOG ERROR: overflow detcted (total=%u, new=%u)\n",
+                    overflowcount,
+                    overflowcount - lastOverflowCount);
+            lastOverflowCount = overflowcount;
+        }
+        if (underflowcount != lastUnderflowCount){
+            printf("LOG ERROR: overflow detcted (total=%u, new=%u)\n",
+                    underflowcount,
+                    underflowcount - lastUnderflowCount);
+            lastUnderflowCount = underflowcount;
+        }
 
-        printf("AFTER SLEEP pid=%u\n",
-            picos_current[get_core_num()]->pid);
+
+        sleep_ms(1000);
     }
 }
 
@@ -234,13 +238,10 @@ int main() {
 
     picos_init();
 
-    PICOS_THREAD(thread1, 3);
-    //PICOS_THREAD(thread2, 3);
-    //PICOS_THREAD(thread3, 3);
-    //PICOS_THREAD(thread4, 2);
-    //PICOS_THREAD(thread5, 2);
-    //PICOS_THREAD(thread6, 1);
-    //PICOS_THREAD(thread7, 0);
-    PICOS_THREAD(test_report, 2);
+    PICOS_THREAD(test1, 100);
+    PICOS_THREAD(test2, 200);
+    PICOS_THREAD(test3, 300);
+    PICOS_THREAD(test_report, 50);
+
     picos_start();
 }
