@@ -1,5 +1,7 @@
 #include "picos.h"
 #include <stdio.h>
+
+
 #define PICOS_IDLE_STACK_SIZE 100
 // Define the declared variables from the header
 picos_thread_t picos_threads[PICOS_MAX_THREADS];
@@ -12,6 +14,15 @@ static volatile uint32_t picos_log_tail[PICOS_CORES] = {0};
 static uint32_t picos_log_overflow_count[PICOS_CORES] = {0};
 static uint32_t picos_log_underflow_count = 0;
 static uint8_t picos_log_rr_core = 0;
+
+//Load balancing configuration
+#define PICOS_REBALANCING_INTERVAL_US 50000 //Rebalance every 50msec
+#define PICOS_LOAD_IMBALANCE_THREAD_PCT 20 //20% imbalance triggers rebalance
+#define PICOS_REBALANCE_COOLDOWN_US 10000 //Don't rebalance more than every 10msec
+
+//LOAD balancing state
+static uint64_t picos_last_rebalance_time = 0;
+static uint64_t picos_last_migration_time[PICOS_MAX_THREADS] = {0};
 
 // Declare functions that will be later defined
 void picos_setup_idle();
@@ -110,10 +121,86 @@ void picos_log_note_underflow(void){
     picos_log_underflow_count++;
 }
 
+//Calculate total execution time (load) for a given core
+static uint64_t picos_calc_core_load(uint8_t core) {
+    uint64_t load =0;
+    for (picos_pid i = PICOS_CORES; i < PICOS_MAX_THREADS; i++) {
+        picos_thread_t *t = &picos_threads[i];
+        if (t->state != PICOS_UNKNOWN && t->cpu == core){
+            load += t->execTime;
+        }
+    }
+    return load;
+}
+
+//Perform load balancing by migrating threads if imbalance is detected
+static void picos_rebalance_cores(uint64_t now){
+    //Check if rebalance interval has elapsed
+    if (now - picos_last_rebalance_time < PICOS_REBALANCING_INTERVAL_US){
+        return;
+    }
+    picos_last_rebalance_time = now;
+    //Calculate load on each core
+    uint64_t load0 = picos_calc_core_load(0);
+    uint64_t load1 = picos_calc_core_load(1);
+
+    uint64_t max_load = (load0 > load1) ? load0 : load1;
+    uint64_t min_load = (load0 < load1) ? load0 : load1;
+
+    //check if imbalance exceed threshould
+    if (max_load == 0) return;
+    uint64_t imbalance_pct = ((max_load - min_load) * 100) / max_load;
+    if (imbalance_pct < PICOS_LOAD_IMBALANCE_THREAD_PCT) {
+        return; // Load is balanced
+    }
+    //Determine overload and underload cores
+    uint8_t busy_core = (load0 > load1)? 0: 1;
+    uint8_t idle_core = (load0 > load1)? 1: 0;
+
+    //Find lowest-priority movable thread on busy core
+    picos_thread_t *victim = NULL;
+    uint8_t victim_priority = 0;
+
+    for (picos_pid i = PICOS_CORES; i < PICOS_MAX_THREADS; i++){
+        picos_thread_t *t = &picos_threads[i];
+        //Only migrate RUNNING threads that are pinned to busy core
+        if (t->state == PICOS_RUNNING && t->cpu == busy_core && t->priority < 255){
+            if (victim == NULL || t->priority > victim_priority){
+                victim = t;
+                victim_priority = t->priority;
+            }
+        }
+    }
+    //Migration victim to idle core
+    if (victim != NULL){
+        victim->cpu = idle_core;
+        picos_last_migration_time[victim->pid] = now;
+    }
+}
+
+static void picos_check_stack(picos_thread_t *t)
+{
+    if (t->pid < PICOS_CORES)
+        return; // skip idle threads
+
+    for (int i = 0; i < 8; i++) {
+        if (t->stackBase[i] != 0xDEADBEEF) {
+
+            printf("\n*** STACK OVERFLOW ***\n");
+            printf("pid=%u\n", t->pid);
+            printf("cpu=%u\n", t->cpu);
+            printf("sp=%08lx\n", t->sp);
+            printf("stack[0]=%08lx\n", t->stackBase[i]);
+            while(1);
+        }
+    }
+}
+
 picos_pid picos_exec(picos_thread_func func, picos_thread_stack_t *s, uint8_t priority) {
     picos_pid thread_slot;
 
     spin_lock_blocking(PICOS_SCHEDULE_SPINLOCK);
+
 
     // find free slot
     for (thread_slot = PICOS_CORES; thread_slot < PICOS_MAX_THREADS;
@@ -130,10 +217,18 @@ picos_pid picos_exec(picos_thread_func func, picos_thread_stack_t *s, uint8_t pr
 
     // initialize free slot
     picos_thread_t *slot = &picos_threads[thread_slot];
+    /* Fill stack with canary pattern */
+    for (uint32_t i = 0; i < s->size; i++) {
+        s->data[i] = 0xDEADBEEF;
+    }
+
+    slot->stackBase = s->data;
+    slot->stackTop  = s->data + s->size;
     slot->pid = thread_slot;
     slot->cpu = 0xFF;
     slot->priority = priority;
     // calculate given address to a stack address (switch direction)
+
     slot->sp = (uint32_t)(s->data + s->size - 16);
     s->data[s->size - 1] =
         0x01000000; // This will set the T-Bit in the EPSR Part of the xPSR
@@ -170,7 +265,7 @@ void isr_systick() {
     // Trigger the in assembly defined isr_pendsv via interrupt
     *(volatile uint32_t *)(0xe0000000 | M0PLUS_ICSR_OFFSET) = (1L << 28);
 }
-
+/*
 void isr_hardfault() {
     //uint8_t cpu = *(uint32_t *)(SIO_BASE);
     uint32_t cpu = get_core_num();
@@ -185,6 +280,44 @@ void isr_hardfault() {
     for (;;)
         ;
 }
+*/
+__attribute__((naked))
+void isr_hardfault(void)
+{
+    __asm volatile(
+        "mrs r0, psp     \n"
+        "b hardfault_c   \n"
+    );
+}
+#define M0PLUS_BASE   0xE000ED00
+
+#define CFSR   (*(volatile uint32_t *)(M0PLUS_BASE + 0x28))
+#define HFSR   (*(volatile uint32_t *)(M0PLUS_BASE + 0x2C))
+#define DFSR   (*(volatile uint32_t *)(M0PLUS_BASE + 0x30))
+#define MMFAR  (*(volatile uint32_t *)(M0PLUS_BASE + 0x34))
+#define BFAR   (*(volatile uint32_t *)(M0PLUS_BASE + 0x38))
+
+void hardfault_c(uint32_t *stack)
+{
+    printf("\n*** HARDFAULT ***\n");
+
+    printf("R0  = %08lx\n", stack[0]);//@todo check whether it dump in right order??
+    printf("R1  = %08lx\n", stack[1]);
+    printf("R2  = %08lx\n", stack[2]);
+    printf("R3  = %08lx\n", stack[3]);
+    printf("R12 = %08lx\n", stack[4]);
+    printf("LR  = %08lx\n", stack[5]);
+    printf("PC  = %08lx\n", stack[6]);
+    printf("PSR = %08lx\n", stack[7]);
+
+    printf("HFSR  = %08lx\n", HFSR);
+    printf("CFSR  = %08lx\n", CFSR);
+    printf("DFSR  = %08lx\n", DFSR);
+    printf("BFAR  = %08lx\n", BFAR);
+    printf("MMFAR = %08lx\n", MMFAR);
+
+    while(1);
+}
 
 void picos_schedule() {
 
@@ -192,7 +325,11 @@ void picos_schedule() {
 
     picos_thread_t *current = picos_current[cpu];
     pico_core_stats_t *stats = &pico_core_stats[cpu];
-
+#if 0
+    if (current && current->pid >= PICOS_CORES) {
+        picos_check_stack(current);
+    }
+#endif
     uint64_t now = time_us_64();
     uint8_t cpriority = 255;
     current->yielded = false; // Yield waits for this to reset
@@ -217,6 +354,13 @@ void picos_schedule() {
     }
 
     stats->lastContextTime = now;
+
+    //============
+    // 2B. PERFORM LOAD BALANCING
+    //=============
+    spin_lock_blocking(PICOS_SCHEDULE_SPINLOCK);
+    picos_rebalance_cores(now);
+    spin_unlock_unsafe(PICOS_SCHEDULE_SPINLOCK);
 
     // =========================
     // 3. PICK NEXT THREAD
@@ -262,7 +406,15 @@ void picos_schedule() {
     if (!next) {
         next = &picos_threads[cpu]; // idle thread
     }
-
+#if 0
+printf("CPU%u current=%u next=%u sp=%08lx state=%u cpu=%u\n",
+       cpu,
+       current ? current->pid : 255,
+       next->pid,
+       next->sp,
+       next->state,
+       next->cpu);
+#endif
     picos_current[cpu] = next;
 
     spin_unlock_unsafe(PICOS_SCHEDULE_SPINLOCK);
@@ -271,13 +423,13 @@ void picos_schedule() {
     // 4. SET START TIME FOR NEW THREAD
     // =========================
     next->lastStartTime = time_us_64();
-/*
+#if 0
     printf("CPU%d current=%d next=%d prio=%d\n",
        cpu,
        current->pid,
        next->pid,
        next->priority);
-*/
+#endif
 
 }
 
@@ -300,6 +452,10 @@ void picos_setup_idle() {
         t->cpu = i;
         t->priority = 255;
         t->state = PICOS_RUNNING;
+        /* Fill stack with canary pattern */
+        for (uint32_t i = 0; i < s->size; i++) {
+            s->data[i] = 0xDEADBEEF;
+        }
 
         // Setting the correct stack data and position
         s->data[s->size - 1] =

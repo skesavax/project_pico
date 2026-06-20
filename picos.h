@@ -159,6 +159,8 @@ typedef struct picos_thread_t {
      * @brief Execution time of thread
      */
     uint64_t execTime;
+    uint32_t *stackBase;   // lowest address
+    uint32_t *stackTop;    // highest address
 } picos_thread_t;
 
 typedef struct picos_run_log_entry_t {

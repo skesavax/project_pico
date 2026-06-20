@@ -3,7 +3,7 @@
 #include "pico/stdlib.h"
 #include <stdio.h>
 
-PICOS_STACK(test1, 128);
+PICOS_STACK(test1, 1024);
 void test1() {
     volatile uint32_t sum = 0;
     while (true) {
@@ -18,20 +18,7 @@ void test1() {
     }
 }
 
-PICOS_STACK(test1x, 128);
-void test1x() {
-    for (;;) {
-        uint8_t core = get_core_num();
-        picos_thread_t *current = picos_current[core];
-        if (current && current->pid >= PICOS_CORES){
-            ;//picos_log_thread_run(core, current->priority, current->pid, time_us_64());
-        }
-        //printf("thread-1\n\r");
-        delayms(200);
-    }
-}
-
-PICOS_STACK(test2, 128);
+PICOS_STACK(test2, 1024);
 void test2() {
     volatile uint32_t sum = 0;
     while (true) {
@@ -45,72 +32,13 @@ void test2() {
         delayms(300);
     }
 }
-/*
-PICOS_STACK(test2, 128);
-void test2() {
-    volatile uint32_t sum = 0;
-    while (true) {
-        uint8_t core = get_core_num();
-        picos_thread_t *current = picos_current[core];
-        if (current && current->pid >= PICOS_CORES){
-            ;//picos_log_thread_run(core, current->priority, current->pid, time_us_64());
-        }
-        //printf("thread-1\n\r");
-        delayms(5000);
-    }
-}
-    */
-/*
-PICOS_STACK(test3, 128);
+
+PICOS_STACK(test3, 1024);
 void test3() {
     volatile uint32_t sum = 0;
-    static uint32_t lastOverflowCount = 0;
-    static uint32_t lastUnderflowCount = 0;
     while (true) {
-        for (uint32_t i = 0; i < 200000; i++)
+        for (uint32_t i = 0; i < 100000; i++)
             sum += i;
-                picos_run_log_entry_t log_entry;
-        bool has_log_entries = false;
-        while (picos_log_pop(&log_entry)){
-            has_log_entries = true;
-            uint8_t *p = (uint8_t *)&log_entry;
-            uint32_t lo = (uint32_t)log_entry.timestamp_us;
-            uint32_t hi = (uint32_t)(log_entry.timestamp_us >> 32);
-
-            printf("ts_hi=%u ts_lo=%u\n", hi, lo);
-
-            for (int i = 0; i < sizeof(log_entry); i++) {
-                printf("%02X ", p[i]);
-            }
-            printf("\n");
-        }
-
-        if (!has_log_entries){
-            picos_log_note_underflow();
-        }
-        uint32_t overflowcount = picos_log_get_overflow_count();
-        uint32_t underflowcount = picos_log_get_underflow_count();
-        if (overflowcount != lastOverflowCount){
-            printf("LOG ERROR: overflow detcted (total=%u, new=%u)\n",
-                    overflowcount,
-                    overflowcount - lastOverflowCount);
-            lastOverflowCount = overflowcount;
-        }
-        if (underflowcount != lastUnderflowCount){
-            printf("LOG ERROR: overflow detcted (total=%u, new=%u)\n",
-                    underflowcount,
-                    underflowcount - lastUnderflowCount);
-            lastUnderflowCount = underflowcount;
-        }
-        delayms(300);
-    }
-}
-*/
-
-PICOS_STACK(test3, 128);
-void test3() {
-    volatile uint32_t sum = 0;
-    while (true) {
         uint8_t core = get_core_num();
         picos_thread_t *current = picos_current[core];
         if (current && current->pid >= PICOS_CORES){
@@ -121,7 +49,7 @@ void test3() {
     }
 }
 
-PICOS_STACK(test_report, 1024);
+PICOS_STACK(test_report, 4096);
 
 void test_report() {
 
@@ -134,7 +62,7 @@ void test_report() {
 
 
     while (true) {
-#if 0
+#if 0 //report stats of both cores
         uint64_t now = time_us_64();
         uint64_t elapsed = now - lastTime;
 
@@ -198,7 +126,8 @@ void test_report() {
                    cpu_pct);
         }
 #endif
-                picos_run_log_entry_t log_entry;
+#if 1
+        picos_run_log_entry_t log_entry;
         bool has_log_entries = false;
         while (picos_log_pop(&log_entry)){
             has_log_entries = true;
@@ -227,7 +156,7 @@ void test_report() {
                     underflowcount - lastUnderflowCount);
             lastUnderflowCount = underflowcount;
         }
-
+#endif
 
         sleep_ms(1000);
     }
@@ -239,9 +168,9 @@ int main() {
     picos_init();
 
     PICOS_THREAD(test1, 100);
-    PICOS_THREAD(test2, 200);
+    PICOS_THREAD(test2, 100);
     PICOS_THREAD(test3, 300);
-    PICOS_THREAD(test_report, 50);
+    PICOS_THREAD(test_report, 400);
 
     picos_start();
 }
